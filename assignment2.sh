@@ -1,91 +1,108 @@
 #!/bin/bash
 
-set -e #This will stop the script if an error occours
+#This scipt makes the host have a static IP, updates /etc/hosts, installs
+#apache2 and squid unless they are already present
+#and creates user accounts with SSH keys. 
 
 
-configure_netplan() { #function to configure the netplan 
-    file="/etc/netplan/01-netcfg.yaml" #variable for netplan file
-    ip="192.168.16.21/24" #varable for the set static ip
+set -e #this stops if there's any error
 
-    if grep -q "ip" "$file"; then #if the file already has the ip then it doesnt change anything
-        log "Netplan already configured with $ip"
+log() {
+    echo -e "\e[32m[INFO]\e[0m $1" #print messages in green
+}
 
-    else #else the command will continue and change the file
-        log "Updating Netplan configuration..."
-        sed -i '/addresses:/d' "$file" # deletes the prevoious ip
-        sed -i "/dhcp4:/a \ \ \ \ addresses: [$ip]" "$file" #sets the new ip after line dhcp4 as 
-        netplan apply #applies the newly changed netplan
-        log "Netplan updated and applied with static IP $ip"
+if [ "$EUID" -ne 0 ]; then
+    echo "Run as root" #make sure script is run as root
+    exit 1
+fi
+
+setupnetplan() {
+    config=$(find /etc/netplan -type f | head -n 1) #netplan config file
+    ip="192.168.16.21/24" #ip to set
+
+    if grep -q "$ip" "$config"; then
+        log "IP already set"
+    else
+        log "Setting static IP"
+
+        sed -i '/addresses:/d' "$config" #remove old address
+        sed -i "/dhcp4:/a \ \ \ \ addresses: [$ip]" "$config" #add new IP
+        netplan apply #apply the config
+
+        log "Static IP applied"
     fi
 }
 
 fixetchosts() {
-    grep -q "192.168.16.21 server1" /etc/hosts || {
-        sed -i '/server1/d' /etc/hosts
-        echo "192.168.16.21 server1" >> /etc/hosts
-        log "/etc/hosts updated with server1"
-    }
+    entry="192.168.16.21 server1" #line to add
+
+    if grep -q "$entry" /etc/hosts; then
+        log "hosts file already ok"
+    else
+        sed -i '/server1/d' /etc/hosts #remove any old server1 line
+        echo "$entry" >> /etc/hosts #add correct line
+        log "hosts file updated"
+    fi
 }
 
-install_software() {
+installsoftware() {
     for pkg in apache2 squid; do
-        if dpkg -s $pkg &>/dev/null; then
-            log "$pkg is already installed"
+        if dpkg -s "$pkg" &>/dev/null; then
+            log "$pkg already installed"
         else
-            log "Installing $pkg..."
-            apt-get update -qq && apt-get install -y $pkg
+            log "Installing $pkg"
+            apt-get update -qq #quiet update
+            apt-get install -y "$pkg" #install package
             log "$pkg installed"
         fi
     done
 }
 
-
-
-
-
-create_users() {
+createusers() {
     users=(dennis aubrey captain snibbles brownie scooter sandy perrier cindy tiger yoda)
+    sharedkey="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG4rT3vTt99Ox5kndS4HmgTrKBT8SKzhK4rhGkEVGlCI student@generic-vm"
 
     for user in "${users[@]}"; do
-        # Create user if they don't exist
         if ! id "$user" &>/dev/null; then
-            useradd -m -s /bin/bash "$user"
-            echo "Created user: $user"
+            useradd -m -s /bin/bash "$user" #create user with bash shell
+            log "Created $user"
+        else
+            log "$user already exists"
         fi
 
-        sshdir="/home/$user/.ssh"
-        mkdir -p "$sshdir"
-        chmod 700 "$sshdir"
+        sshfolder="/home/$user/.ssh" #user's ssh folder
+        mkdir -p "$sshfolder" #make .ssh folder if missing
+        chmod 700 "$sshfolder" #only owner can enter
+        chown "$user:$user" "$sshfolder" #set owner of folder
 
-        # Generate SSH keys if not already there
-        su - "$user" -c '[ -f ~/.ssh/id_rsa ] || ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa -q'
-        su - "$user" -c '[ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 -q'
+        su - "$user" -c '[ -f ~/.ssh/id_rsa ] || ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa -q' #make RSA key if missing
+        su - "$user" -c '[ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 -q' #make ed25519 key if missing
 
-        # Combine both keys into authorized_keys
-        cat "$sshdir/id_rsa.pub" "$sshdir/id_ed25519.pub" > "$sshdir/authorized_keys"
-        chmod 600 "$sshdir/authorized_keys"
-        chown -R "$user:$user" "$sshdir"
+        #add public keys to authorized_keys
+        cat "$sshfolder/id_rsa.pub" "$sshfolder/id_ed25519.pub" > "$sshfolder/authorized_keys" #combine both keys
+        chmod 600 "$sshfolder/authorized_keys" #only user can read/write file
+        chown -R "$user:$user" "$sshfolder" #set owner for whole ssh folder
 
-        # Extra stuff for dennis
         if [ "$user" = "dennis" ]; then
-            usermod -aG sudo dennis
-            echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG4rT3vTt99Ox5kndS4HmgTrKBT8SKzhK4rhGkEVGlCI student@generic-vm" >> "$sshdir/authorized_keys"
-            echo "Added sudo and extra key for dennis"
+            usermod -aG sudo "$user" #add to sudo group
+            echo "$sharedkey" >> "$sshfolder/authorized_keys" #add shared key
+            log "Gave sudo and extra key to dennis"
         fi
     done
 
-    echo "All users set up"
+    log "All users set up"
 }
 
 main() {
-    log "Starting assignment2 configuration..."
+    log "Starting setup"
 
-    configure_netplan
-    fix_etchosts
-    install_software
-    create_users
+    setupnetplan
+    fixetchosts
+    installsoftware
+    createusers
 
-    log "Configuration complete."
+    log "Done"
 }
 
 main
+
